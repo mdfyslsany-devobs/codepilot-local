@@ -1,0 +1,19 @@
+{
+  "name": "@codepilot/instruction-parser",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Deterministic instruction parser for CodePilot Local",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@codepilot/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}
