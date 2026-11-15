@@ -1,0 +1,22 @@
+{
+  "name": "@codepilot/file-engine",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Safe, transactional local filesystem engine for CodePilot Local",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@codepilot/database": "workspace:*",
+    "@codepilot/shared": "workspace:*",
+    "diff": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/diff": "^7.0.0",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

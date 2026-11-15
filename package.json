@@ -1,0 +1,21 @@
+{
+  "name": "codepilot-local",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local-First Personal Coding Automation Agent",
+  "packageManager": "pnpm@12.21.0",
+  "scripts": {
+    "build": "pnpm -r --filter=\"./packages/*\" run build",
+    "dev": "pnpm --filter @codepilot/local-server dev",
+    "start": "pnpm --filter @codepilot/local-server start",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "pnpm -r exec tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.5"
+  }
+}

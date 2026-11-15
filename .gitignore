@@ -1,0 +1,38 @@
+node_modules/
+dist/
+build/
+.turbo/
+.cache/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Database & local data
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+.codepilot-local/
+data/
+
+# Environment & credentials
+.env
+.env.local
+.env.*.local
+*.token
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Tauri build artifacts
+src-tauri/target/
+
+# VS Code extension build artifacts
+*.vsix
