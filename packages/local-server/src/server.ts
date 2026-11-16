@@ -46,7 +46,8 @@ export async function createServer(options: ServerOptions = {}): Promise<{
   };
 }> {
   const server = Fastify({
-    logger: false
+    logger: false,
+    bodyLimit: 52428800
   });
 
   await server.register(sensible);
