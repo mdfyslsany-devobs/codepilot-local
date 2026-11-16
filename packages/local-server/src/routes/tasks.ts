@@ -14,7 +14,15 @@ import {
   PlanTaskRequestSchema,
   ErrorCode
 } from '@codepilot/shared';
-import { parseInstructions } from '@codepilot/instruction-parser';
+import {
+  detectDuplicateFiles,
+  detectFolderStructure,
+  detectMissingContent,
+  generateManifest,
+  parseInstructions,
+  smartExtract,
+  type CandidateBlock
+} from '@codepilot/instruction-parser';
 import type { EventBroadcaster } from '../websocket/broadcaster.js';
 
 export async function taskRoutes(
@@ -116,7 +124,29 @@ export async function taskRoutes(
         // Project directory may be empty or not yet created
       }
 
-      const manifest = parseInstructions(markdown, { existingFiles });
+      const smartFiles = smartExtract(markdown);
+      const manifest =
+        smartFiles.length > 0
+          ? (() => {
+              const candidateBlocks: CandidateBlock[] = smartFiles.map((file, codeBlockIndex) => ({
+                codeBlockIndex,
+                filename: file.filename,
+                content: file.content,
+                language: file.language
+              }));
+              const duplicateResult = detectDuplicateFiles(candidateBlocks);
+              const missingContentResult = detectMissingContent(candidateBlocks);
+
+              return generateManifest({
+                markdown,
+                blocks: duplicateResult.deduplicated,
+                folders: detectFolderStructure(markdown),
+                duplicateConflicts: duplicateResult.duplicates,
+                contentIssues: missingContentResult.issues,
+                existingFiles
+              });
+            })()
+          : parseInstructions(markdown, { existingFiles });
 
       if (taskId) {
         const task = await taskRepo.findById(taskId);
@@ -170,153 +200,162 @@ export async function taskRoutes(
       });
     }
 
-    const { projectId, manifest, taskId: bodyTaskId } = parse.data;
+    try {
+      const { projectId, manifest, taskId: bodyTaskId } = parse.data;
 
-    // Dual-mode: if projectId and manifest are provided, convert manifest into FileOperations
-    if (projectId && manifest) {
-      const project = await projectRepo.findById(projectId);
-      if (!project) {
-        return reply.status(404).send({
-          success: false,
-          error: ErrorCode.NOT_FOUND,
-          message: 'Project not found'
-        });
-      }
+      // Dual-mode: if projectId and manifest are provided, convert manifest into FileOperations
+      if (projectId && manifest) {
+        const project = await projectRepo.findById(projectId);
+        if (!project) {
+          return reply.status(404).send({
+            success: false,
+            error: ErrorCode.NOT_FOUND,
+            message: 'Project not found'
+          });
+        }
 
-      let task = bodyTaskId ? await taskRepo.findById(bodyTaskId) : null;
-      if (bodyTaskId && !task) {
-        return reply.status(404).send({
-          success: false,
-          error: ErrorCode.NOT_FOUND,
-          message: 'Task not found'
-        });
-      }
+        let task = bodyTaskId ? await taskRepo.findById(bodyTaskId) : null;
+        if (bodyTaskId && !task) {
+          return reply.status(404).send({
+            success: false,
+            error: ErrorCode.NOT_FOUND,
+            message: 'Task not found'
+          });
+        }
 
-      if (!task) {
-        task = await taskRepo.create({
-          projectId: project.id,
-          title: `Plan generated on ${new Date().toLocaleDateString()}`,
-          inputType: 'TEXT'
-        });
-      }
+        if (!task) {
+          task = await taskRepo.create({
+            projectId: project.id,
+            title: `Plan generated on ${new Date().toLocaleDateString()}`,
+            inputType: 'TEXT'
+          });
+        }
 
-      const currentTaskId = task.id;
-      let plan = await planRepo.findByTaskId(currentTaskId);
-      if (!plan) {
-        plan = await planRepo.create({ taskId: currentTaskId, totalOperations: 0 });
-      }
+        const currentTaskId = task.id;
+        let plan = await planRepo.findByTaskId(currentTaskId);
+        if (!plan) {
+          plan = await planRepo.create({ taskId: currentTaskId, totalOperations: 0 });
+        }
 
-      const operationsToCreate: Array<{
-        planId: string;
-        taskId: string;
-        operationType: string;
-        relativePath: string;
-        targetPath?: string | null;
-        content?: string | null;
-        previousContent?: string | null;
-      }> = [];
+        const operationsToCreate: Array<{
+          planId: string;
+          taskId: string;
+          operationType: string;
+          relativePath: string;
+          targetPath?: string | null;
+          content?: string | null;
+          previousContent?: string | null;
+        }> = [];
 
-      // 1. Folders -> MKDIR operations
-      if (manifest.folders && Array.isArray(manifest.folders)) {
-        for (const rawFolder of manifest.folders) {
-          const normalized = rawFolder
-            .replace(/\\/g, '/')
-            .replace(/^\.\//, '')
-            .replace(/[/\\]+$/, '')
-            .trim();
-          if (normalized) {
+        // 1. Folders -> MKDIR operations
+        if (manifest.folders && Array.isArray(manifest.folders)) {
+          for (const rawFolder of manifest.folders) {
+            const normalized = rawFolder
+              .replace(/\\/g, '/')
+              .replace(/^\.\//, '')
+              .replace(/[/\\]+$/, '')
+              .trim();
+            if (normalized) {
+              operationsToCreate.push({
+                planId: plan.id,
+                taskId: currentTaskId,
+                operationType: 'MKDIR',
+                relativePath: normalized,
+                targetPath: null,
+                content: null,
+                previousContent: null
+              });
+            }
+          }
+        }
+
+        // 2. Files -> CREATE / UPDATE operations
+        if (manifest.files && Array.isArray(manifest.files)) {
+          for (const file of manifest.files) {
+            const normalizedPath = file.path
+              .replace(/\\/g, '/')
+              .replace(/^\.\//, '')
+              .trim();
+            if (!normalizedPath) continue;
+
+            const fullFilePath = path.resolve(project.path, normalizedPath);
+            let existsOnDisk = false;
+            let previousContent: string | null = null;
+
+            try {
+              if (fs.existsSync(fullFilePath) && fs.statSync(fullFilePath).isFile()) {
+                existsOnDisk = true;
+                previousContent = fs.readFileSync(fullFilePath, 'utf8');
+              }
+            } catch {
+              existsOnDisk = false;
+            }
+
             operationsToCreate.push({
               planId: plan.id,
               taskId: currentTaskId,
-              operationType: 'MKDIR',
-              relativePath: normalized,
+              operationType: existsOnDisk ? 'UPDATE' : 'CREATE',
+              relativePath: normalizedPath,
               targetPath: null,
-              content: null,
-              previousContent: null
+              content: file.content,
+              previousContent
             });
           }
         }
-      }
 
-      // 2. Files -> CREATE / UPDATE operations
-      if (manifest.files && Array.isArray(manifest.files)) {
-        for (const file of manifest.files) {
-          const normalizedPath = file.path
-            .replace(/\\/g, '/')
-            .replace(/^\.\//, '')
-            .trim();
-          if (!normalizedPath) continue;
+        const createdOperations = await fileOpRepo.createMany(operationsToCreate);
 
-          const fullFilePath = path.resolve(project.path, normalizedPath);
-          let existsOnDisk = false;
-          let previousContent: string | null = null;
+        await planRepo.updateStatus(plan.id, 'READY');
+        await taskRepo.updateStatus(currentTaskId, 'PLANNED');
+        broadcaster.broadcast('task:planned', { taskId: currentTaskId, planId: plan.id });
 
-          try {
-            if (fs.existsSync(fullFilePath) && fs.statSync(fullFilePath).isFile()) {
-              existsOnDisk = true;
-              previousContent = fs.readFileSync(fullFilePath, 'utf8');
-            }
-          } catch {
-            existsOnDisk = false;
-          }
-
-          operationsToCreate.push({
+        return reply.send({
+          success: true,
+          data: {
             planId: plan.id,
-            taskId: currentTaskId,
-            operationType: existsOnDisk ? 'UPDATE' : 'CREATE',
-            relativePath: normalizedPath,
-            targetPath: null,
-            content: file.content,
-            previousContent
-          });
-        }
-      }
-
-      const createdOperations = await fileOpRepo.createMany(operationsToCreate);
-
-      await planRepo.updateStatus(plan.id, 'READY');
-      await taskRepo.updateStatus(currentTaskId, 'PLANNED');
-      broadcaster.broadcast('task:planned', { taskId: currentTaskId, planId: plan.id });
-
-      return {
-        success: true,
-        data: {
-          planId: plan.id,
-          operations: createdOperations
-        }
-      };
-    }
-
-    // Legacy mode: { taskId } only
-    if (bodyTaskId) {
-      const task = await taskRepo.findById(bodyTaskId);
-      if (!task) {
-        return reply.status(404).send({
-          success: false,
-          error: ErrorCode.NOT_FOUND,
-          message: 'Task not found'
+            operations: createdOperations
+          }
         });
       }
 
-      let plan = await planRepo.findByTaskId(bodyTaskId);
-      if (!plan) {
-        plan = await planRepo.create({ taskId: bodyTaskId, totalOperations: 0 });
+      // Legacy mode: { taskId } only
+      if (bodyTaskId) {
+        const task = await taskRepo.findById(bodyTaskId);
+        if (!task) {
+          return reply.status(404).send({
+            success: false,
+            error: ErrorCode.NOT_FOUND,
+            message: 'Task not found'
+          });
+        }
+
+        let plan = await planRepo.findByTaskId(bodyTaskId);
+        if (!plan) {
+          plan = await planRepo.create({ taskId: bodyTaskId, totalOperations: 0 });
+        }
+
+        await taskRepo.updateStatus(bodyTaskId, 'PLANNED');
+        broadcaster.broadcast('task:planned', { taskId: bodyTaskId, planId: plan.id });
+
+        return reply.send({
+          success: true,
+          data: { plan, operations: [] }
+        });
       }
 
-      await taskRepo.updateStatus(bodyTaskId, 'PLANNED');
-      broadcaster.broadcast('task:planned', { taskId: bodyTaskId, planId: plan.id });
-
-      return {
-        success: true,
-        data: { plan, operations: [] }
-      };
+      return reply.status(400).send({
+        success: false,
+        error: ErrorCode.VALIDATION_ERROR,
+        message: 'Either { projectId, manifest } or { taskId } is required'
+      });
+    } catch (error) {
+      request.log.error({ err: error }, 'Failed to create execution plan');
+      return reply.status(500).send({
+        success: false,
+        error: ErrorCode.INTERNAL_ERROR,
+        message: 'Failed to create execution plan'
+      });
     }
-
-    return reply.status(400).send({
-      success: false,
-      error: ErrorCode.VALIDATION_ERROR,
-      message: 'Either { projectId, manifest } or { taskId } is required'
-    });
   });
 
   // Get Task Diff

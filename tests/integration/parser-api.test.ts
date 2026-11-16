@@ -113,8 +113,43 @@ export const Button = () => <button>Click</button>;
     expect(manifest.warnings).toEqual([]);
   });
 
+  it('ignores orphan blocks when smart extraction finds named files', async () => {
+    const markdown = `### index.html
+\`\`\`html
+<!DOCTYPE html>
+<html><body>Hello</body></html>
+\`\`\`
+
+\`\`\`text
+Unrelated text block
+\`\`\`
+
+\`\`\`text
+Another unrelated block
+\`\`\`
+`;
+
+    const res = await server.inject({
+      method: 'POST',
+      url: '/api/v1/tasks/parse',
+      headers: {
+        host: 'localhost:41777',
+        authorization: `Bearer ${token}`
+      },
+      payload: {
+        projectId: sampleProjectId,
+        markdown
+      }
+    });
+
+    expect(res.statusCode).toBe(200);
+    const manifest = JSON.parse(res.body).data;
+    expect(manifest.files.map((file: { path: string }) => file.path)).toEqual(['index.html']);
+    expect(manifest.errors.some((error: { code: string }) => error.code === 'ORPHAN_BLOCK')).toBe(false);
+  });
+
   // Test Case 2: Parse Validation Error & Missing Content Handling
-  it('Test Case 2: POST /api/v1/tasks/parse handles validation errors and flags placeholders/orphans', async () => {
+  it('Test Case 2: POST /api/v1/tasks/parse reports placeholders and ignores orphan blocks when named files exist', async () => {
     // 2a. Validation Error
     const invalidRes = await server.inject({
       method: 'POST',
@@ -134,7 +169,7 @@ export const Button = () => <button>Click</button>;
     expect(invalidBody.success).toBe(false);
     expect(invalidBody.error).toBe('VALIDATION_ERROR');
 
-    // 2b. Placeholder & Orphan detection
+    // 2b. Placeholder detection and orphan suppression when a named file exists
     const problematicMarkdown = `### src/todo.ts
 \`\`\`ts
 // TODO: implement
@@ -164,14 +199,14 @@ orphanFunction();
 
     const manifest = issueBody.data;
     expect(manifest.files).toHaveLength(0); // Both invalid blocks excluded
-    expect(manifest.errors.length).toBeGreaterThanOrEqual(2);
+    expect(manifest.errors).toHaveLength(1);
 
     const placeholderError = manifest.errors.find((e: any) => e.code === 'PLACEHOLDER_CONTENT');
     expect(placeholderError).toBeDefined();
     expect(placeholderError.filename).toBe('src/todo.ts');
 
     const orphanError = manifest.errors.find((e: any) => e.code === 'ORPHAN_BLOCK');
-    expect(orphanError).toBeDefined();
+    expect(orphanError).toBeUndefined();
   });
 
   // Test Case 3: Successful Plan Generation from Manifest (CREATE, UPDATE, MKDIR)

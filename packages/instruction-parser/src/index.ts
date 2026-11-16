@@ -6,3 +6,4 @@ export * from './duplicate-detector.js';
 export * from './missing-content-detector.js';
 export * from './manifest-generator.js';
 export * from './pipeline.js';
+export * from './smart-extractor.js';
