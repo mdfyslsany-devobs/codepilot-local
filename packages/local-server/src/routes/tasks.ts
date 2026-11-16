@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import type {
   TaskRepository,
@@ -6,7 +8,13 @@ import type {
   ProjectRepository
 } from '@codepilot/database';
 import type { FileEngine } from '@codepilot/file-engine';
-import { ImportTaskRequestSchema, ErrorCode } from '@codepilot/shared';
+import {
+  ImportTaskRequestSchema,
+  ParseTaskRequestSchema,
+  PlanTaskRequestSchema,
+  ErrorCode
+} from '@codepilot/shared';
+import { parseInstructions } from '@codepilot/instruction-parser';
 import type { EventBroadcaster } from '../websocket/broadcaster.js';
 
 export async function taskRoutes(
@@ -78,65 +86,237 @@ export async function taskRoutes(
 
   // Parse Task
   server.post('/api/v1/tasks/parse', async (request, reply) => {
-    const { taskId } = (request.body as { taskId?: string }) || {};
-    if (!taskId) {
+    const parse = ParseTaskRequestSchema.safeParse(request.body);
+    if (!parse.success) {
       return reply.status(400).send({
         success: false,
         error: ErrorCode.VALIDATION_ERROR,
-        message: 'taskId is required'
+        message: parse.error.errors.map((e) => e.message).join(', ')
       });
     }
 
-    const task = await taskRepo.findById(taskId);
-    if (!task) {
-      return reply.status(404).send({
-        success: false,
-        error: ErrorCode.NOT_FOUND,
-        message: 'Task not found'
-      });
+    const { projectId, markdown, taskId } = parse.data;
+
+    // Dual-mode: if projectId and markdown are provided, run the deterministic parser
+    if (projectId && markdown !== undefined) {
+      const project = await projectRepo.findById(projectId);
+      if (!project) {
+        return reply.status(404).send({
+          success: false,
+          error: ErrorCode.NOT_FOUND,
+          message: 'Project not found'
+        });
+      }
+
+      let existingFiles: string[] = [];
+      try {
+        const scanned = await fileEngine.scanProject(project.path);
+        existingFiles = scanned.filter((f) => !f.isDirectory).map((f) => f.relativePath);
+      } catch {
+        // Project directory may be empty or not yet created
+      }
+
+      const manifest = parseInstructions(markdown, { existingFiles });
+
+      if (taskId) {
+        const task = await taskRepo.findById(taskId);
+        if (task) {
+          await taskRepo.updateStatus(taskId, 'PARSED');
+          broadcaster.broadcast('task:parsed', { taskId });
+        }
+      }
+
+      return {
+        success: true,
+        data: manifest
+      };
     }
 
-    await taskRepo.updateStatus(taskId, 'PARSED');
-    broadcaster.broadcast('task:parsed', { taskId });
+    // Legacy mode: { taskId } only
+    if (taskId) {
+      const task = await taskRepo.findById(taskId);
+      if (!task) {
+        return reply.status(404).send({
+          success: false,
+          error: ErrorCode.NOT_FOUND,
+          message: 'Task not found'
+        });
+      }
 
-    return {
-      success: true,
-      data: { task: { ...task, status: 'PARSED' } }
-    };
+      await taskRepo.updateStatus(taskId, 'PARSED');
+      broadcaster.broadcast('task:parsed', { taskId });
+
+      return {
+        success: true,
+        data: { task: { ...task, status: 'PARSED' } }
+      };
+    }
+
+    return reply.status(400).send({
+      success: false,
+      error: ErrorCode.VALIDATION_ERROR,
+      message: 'Either { projectId, markdown } or { taskId } is required'
+    });
   });
 
   // Plan Task
   server.post('/api/v1/tasks/plan', async (request, reply) => {
-    const { taskId } = (request.body as { taskId?: string }) || {};
-    if (!taskId) {
+    const parse = PlanTaskRequestSchema.safeParse(request.body);
+    if (!parse.success) {
       return reply.status(400).send({
         success: false,
         error: ErrorCode.VALIDATION_ERROR,
-        message: 'taskId is required'
+        message: parse.error.errors.map((e) => e.message).join(', ')
       });
     }
 
-    const task = await taskRepo.findById(taskId);
-    if (!task) {
-      return reply.status(404).send({
-        success: false,
-        error: ErrorCode.NOT_FOUND,
-        message: 'Task not found'
-      });
+    const { projectId, manifest, taskId: bodyTaskId } = parse.data;
+
+    // Dual-mode: if projectId and manifest are provided, convert manifest into FileOperations
+    if (projectId && manifest) {
+      const project = await projectRepo.findById(projectId);
+      if (!project) {
+        return reply.status(404).send({
+          success: false,
+          error: ErrorCode.NOT_FOUND,
+          message: 'Project not found'
+        });
+      }
+
+      let task = bodyTaskId ? await taskRepo.findById(bodyTaskId) : null;
+      if (bodyTaskId && !task) {
+        return reply.status(404).send({
+          success: false,
+          error: ErrorCode.NOT_FOUND,
+          message: 'Task not found'
+        });
+      }
+
+      if (!task) {
+        task = await taskRepo.create({
+          projectId: project.id,
+          title: `Plan generated on ${new Date().toLocaleDateString()}`,
+          inputType: 'TEXT'
+        });
+      }
+
+      const currentTaskId = task.id;
+      let plan = await planRepo.findByTaskId(currentTaskId);
+      if (!plan) {
+        plan = await planRepo.create({ taskId: currentTaskId, totalOperations: 0 });
+      }
+
+      const operationsToCreate: Array<{
+        planId: string;
+        taskId: string;
+        operationType: string;
+        relativePath: string;
+        targetPath?: string | null;
+        content?: string | null;
+        previousContent?: string | null;
+      }> = [];
+
+      // 1. Folders -> MKDIR operations
+      if (manifest.folders && Array.isArray(manifest.folders)) {
+        for (const rawFolder of manifest.folders) {
+          const normalized = rawFolder
+            .replace(/\\/g, '/')
+            .replace(/^\.\//, '')
+            .replace(/[/\\]+$/, '')
+            .trim();
+          if (normalized) {
+            operationsToCreate.push({
+              planId: plan.id,
+              taskId: currentTaskId,
+              operationType: 'MKDIR',
+              relativePath: normalized,
+              targetPath: null,
+              content: null,
+              previousContent: null
+            });
+          }
+        }
+      }
+
+      // 2. Files -> CREATE / UPDATE operations
+      if (manifest.files && Array.isArray(manifest.files)) {
+        for (const file of manifest.files) {
+          const normalizedPath = file.path
+            .replace(/\\/g, '/')
+            .replace(/^\.\//, '')
+            .trim();
+          if (!normalizedPath) continue;
+
+          const fullFilePath = path.resolve(project.path, normalizedPath);
+          let existsOnDisk = false;
+          let previousContent: string | null = null;
+
+          try {
+            if (fs.existsSync(fullFilePath) && fs.statSync(fullFilePath).isFile()) {
+              existsOnDisk = true;
+              previousContent = fs.readFileSync(fullFilePath, 'utf8');
+            }
+          } catch {
+            existsOnDisk = false;
+          }
+
+          operationsToCreate.push({
+            planId: plan.id,
+            taskId: currentTaskId,
+            operationType: existsOnDisk ? 'UPDATE' : 'CREATE',
+            relativePath: normalizedPath,
+            targetPath: null,
+            content: file.content,
+            previousContent
+          });
+        }
+      }
+
+      const createdOperations = await fileOpRepo.createMany(operationsToCreate);
+
+      await planRepo.updateStatus(plan.id, 'READY');
+      await taskRepo.updateStatus(currentTaskId, 'PLANNED');
+      broadcaster.broadcast('task:planned', { taskId: currentTaskId, planId: plan.id });
+
+      return {
+        success: true,
+        data: {
+          planId: plan.id,
+          operations: createdOperations
+        }
+      };
     }
 
-    let plan = await planRepo.findByTaskId(taskId);
-    if (!plan) {
-      plan = await planRepo.create({ taskId, totalOperations: 0 });
+    // Legacy mode: { taskId } only
+    if (bodyTaskId) {
+      const task = await taskRepo.findById(bodyTaskId);
+      if (!task) {
+        return reply.status(404).send({
+          success: false,
+          error: ErrorCode.NOT_FOUND,
+          message: 'Task not found'
+        });
+      }
+
+      let plan = await planRepo.findByTaskId(bodyTaskId);
+      if (!plan) {
+        plan = await planRepo.create({ taskId: bodyTaskId, totalOperations: 0 });
+      }
+
+      await taskRepo.updateStatus(bodyTaskId, 'PLANNED');
+      broadcaster.broadcast('task:planned', { taskId: bodyTaskId, planId: plan.id });
+
+      return {
+        success: true,
+        data: { plan, operations: [] }
+      };
     }
 
-    await taskRepo.updateStatus(taskId, 'PLANNED');
-    broadcaster.broadcast('task:planned', { taskId, planId: plan.id });
-
-    return {
-      success: true,
-      data: { plan, operations: [] }
-    };
+    return reply.status(400).send({
+      success: false,
+      error: ErrorCode.VALIDATION_ERROR,
+      message: 'Either { projectId, manifest } or { taskId } is required'
+    });
   });
 
   // Get Task Diff

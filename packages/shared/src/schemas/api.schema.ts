@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { TASK_INPUT_TYPES } from '../constants/defaults.js';
+import { FileOperationSchema } from './operation.schema.js';
 
 // Health
 export const HealthResponseSchema = z.object({
@@ -29,15 +30,98 @@ export const ImportTaskRequestSchema = z.object({
 });
 export type ImportTaskRequest = z.infer<typeof ImportTaskRequestSchema>;
 
-export const ParseTaskRequestSchema = z.object({
-  taskId: z.string().uuid()
+export const ManifestFileSchema = z.object({
+  path: z.string().min(1, 'Path cannot be empty'),
+  content: z.string(),
+  language: z.string().nullable(),
+  isNew: z.boolean()
 });
+export type ManifestFile = z.infer<typeof ManifestFileSchema>;
+
+export const ManifestWarningSchema = z.object({
+  code: z.string().min(1),
+  message: z.string().min(1),
+  filename: z.string().nullable().optional(),
+  codeBlockIndex: z.number().int().nonnegative().optional()
+});
+export type ManifestWarning = z.infer<typeof ManifestWarningSchema>;
+
+export const ManifestErrorSchema = z.object({
+  code: z.string().min(1),
+  message: z.string().min(1),
+  filename: z.string().nullable().optional(),
+  codeBlockIndex: z.number().int().nonnegative().optional()
+});
+export type ManifestError = z.infer<typeof ManifestErrorSchema>;
+
+export const ExecutionManifestSchema = z.object({
+  version: z.string(),
+  createdAt: z.string().datetime(),
+  instructionsHash: z.string().length(64),
+  folders: z.array(z.string()),
+  files: z.array(ManifestFileSchema),
+  warnings: z.array(ManifestWarningSchema),
+  errors: z.array(ManifestErrorSchema)
+});
+export type ExecutionManifest = z.infer<typeof ExecutionManifestSchema>;
+
+export const ParseTaskRequestSchema = z
+  .object({
+    projectId: z.string().uuid({ message: 'Valid projectId UUID is required' }).optional(),
+    markdown: z.string().min(1, { message: 'Markdown content cannot be empty' }).optional(),
+    taskId: z.string().uuid({ message: 'Valid taskId UUID is required' }).optional()
+  })
+  .superRefine((data, ctx) => {
+    if (!data.taskId && (!data.projectId || !data.markdown)) {
+      if (!data.projectId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['projectId'],
+          message: 'Valid projectId UUID is required'
+        });
+      }
+      if (!data.markdown) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['markdown'],
+          message: 'Markdown content cannot be empty'
+        });
+      }
+    }
+  });
 export type ParseTaskRequest = z.infer<typeof ParseTaskRequestSchema>;
 
-export const PlanTaskRequestSchema = z.object({
-  taskId: z.string().uuid()
-});
+export const PlanTaskRequestSchema = z
+  .object({
+    projectId: z.string().uuid({ message: 'Valid projectId UUID is required' }).optional(),
+    manifest: ExecutionManifestSchema.optional(),
+    taskId: z.string().uuid({ message: 'Valid taskId UUID is required' }).optional()
+  })
+  .superRefine((data, ctx) => {
+    if (!data.taskId && (!data.projectId || !data.manifest)) {
+      if (!data.projectId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['projectId'],
+          message: 'Valid projectId UUID is required'
+        });
+      }
+      if (!data.manifest) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['manifest'],
+          message: 'Manifest is required'
+        });
+      }
+    }
+  });
 export type PlanTaskRequest = z.infer<typeof PlanTaskRequestSchema>;
+
+export const PlanTaskResponseDataSchema = z.object({
+  planId: z.string().uuid(),
+  operations: z.array(FileOperationSchema)
+});
+export type PlanTaskResponseData = z.infer<typeof PlanTaskResponseDataSchema>;
 
 export const ApproveTaskRequestSchema = z.object({
   operationIds: z.array(z.string().uuid()).optional()
