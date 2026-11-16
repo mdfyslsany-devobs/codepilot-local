@@ -454,10 +454,16 @@ export async function taskRoutes(
     }
 
     const operations = await fileOpRepo.findByTaskId(id);
-    // Execute approved or pending operations
-    const executableOps = operations.filter((op) =>
-      ['APPROVED', 'PENDING'].includes(op.status)
-    );
+    // Only APPROVED operations may execute (spec §5 Module 5, §10)
+    const pendingOps = operations.filter((op) => op.status === 'PENDING');
+    if (pendingOps.length > 0) {
+      return reply.status(409).send({
+        success: false,
+        error: 'PENDING_APPROVAL',
+        message: `${pendingOps.length} operation(s) require approval before execution`,
+      });
+    }
+    const executableOps = operations.filter((op) => op.status === 'APPROVED');
 
     let executed = 0;
     let failed = 0;
