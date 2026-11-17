@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 import {
   approveTask,
   createProject as createProjectRequest,
@@ -41,6 +42,34 @@ export default function App() {
   const [loadingProjects, setLoadingProjects] = useState(false);
   const [creatingProject, setCreatingProject] = useState(false);
   const [busyAction, setBusyAction] = useState('');
+
+  useEffect(() => {
+    if (!isTauri()) {
+      return;
+    }
+
+    let active = true;
+    invoke<string>('get_auth_token')
+      .then((authToken) => {
+        const value = authToken.trim();
+        if (!active || !value) {
+          return;
+        }
+
+        window.localStorage.setItem('codepilot-api-token', value);
+        setTokenInput(value);
+        setToken(value);
+      })
+      .catch((invokeError: unknown) => {
+        if (active) {
+          setError(getErrorMessage(invokeError));
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!token) {
